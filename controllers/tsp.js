@@ -8,20 +8,102 @@ var curPolyline;
 var markers = [];
 var locations = [];
 var distanceMatrix;
-
+var stopTimes;
 var request = require('request');
+var Promise = require("bluebird");
+var closingHours = [];
+var moment = require('moment');
+var firebase = require("firebase");
+
+var config = {
+	apiKey: "AIzaSyBnW9KtyHptZNlqyuBoSK-vUHI0MdgWeRc",
+	authDomain: "hackthenorth16-1758.firebaseapp.com",
+	databaseURL: "https://hackthenorth16-1758.firebaseio.com",
+	storageBucket: "hackthenorth16-1758.appspot.com",
+	messagingSenderId: "384256880141"
+};
+
+
+
+
+var createPlacePromise = function(url){
+	var ret = new Promise(function(resolve, reject) {
+		request(url,function(error,response,body){
+			if(!error && response.statusCode == 200){
+				resolve(body);
+			}
+		})
+	});
+	return ret;
+}
 
 
 exports.getLocations = function(req,res,next){
-	locations = 'Vancouver+BC|Seattle'.split('|');
-  request('https://maps.googleapis.com/maps/api/distancematrix/json?origins=Vancouver+BC|Seattle&destinations=Vancouver+BC|Seattle&mode=bicycling', function (error, response, body) {
-    if (!error && response.statusCode == 200) {
-      var response = JSON.parse(body);
-      distanceMatrix = new DistanceMatrix(response);
-      var best = runGA();
-      res.json(best);
-    }
-  })
+	//locations = 'Vancouver+BC|Seattle'.split('|');
+	var origins = req.query.origins;
+	var destinations = req.query.destinations;
+	var pids = req.query.placeIds.split(',');
+	stopTimes = req.query.durations.split(',');
+	for(var i = 0; i < stopTimes.length; i++){
+		stopTimes[i] *= 60;
+	}
+	var dayNum = moment().day();
+	console.log(dayNum);
+	closingHours = [];
+	var places = [];
+	locations = origins.split('|');
+	for(var i = 0; i < pids.length; i++){
+		var url = 'https://maps.googleapis.com/maps/api/place/details/json?placeid=' + pids[i] + '&key=AIzaSyDp9BP6P9_GnKaj_x6lEWw9edNlBMrdbtY';
+		places.push(createPlacePromise(url));
+	}
+	Promise.all(places)
+	.then(function(responses){
+		for(var ri in responses){
+			var res = JSON.parse(responses[ri]);
+			console.log(res);
+			if(res.result.hasOwnProperty('opening_hours')){
+				if(!res.result.opening_hours.open_now){
+					closingHours.push(0);
+				}
+				else if(res.result.opening_hours.periods[dayNum].hasOwnProperty('close')){
+					console.log(res.result.opening_hours.periods[dayNum]);
+					var closingTime = parseInt(res.result.opening_hours.periods[dayNum].close.time.substring(0,2)) * 3600;
+					closingTime += parseInt(res.result.opening_hours.periods[dayNum].close.time.substring(2,4));
+					closingHours.push(closingTime);
+				}
+				else closingHours.push(87000);
+			}
+			else closingHours.push(87000);
+		}
+		return closingHours;
+	})
+	.then(function(closingHours){
+		request('https://maps.googleapis.com/maps/api/distancematrix/json?origins=' + origins + '&destinations='+ destinations + '&key=AIzaSyDp9BP6P9_GnKaj_x6lEWw9edNlBMrdbtY', function (error, response, body) {
+			if (!error && response.statusCode == 200) {
+				//console.log(body);
+
+				var response = JSON.parse(body);
+				distanceMatrix = new DistanceMatrix(response);
+				console.log('yo', closingHours);
+
+				var best = runGA();
+				if(best.length){
+					res.json({
+						status: 'OK',
+						optimalRoute: best
+					})
+				}
+				else{
+					res.json({
+						status: 'fail',
+						optimalRoute: best
+					});
+				}
+			}
+		})
+	})
+
+	//console.log(origins);
 }
 
 function runGA() {
@@ -36,7 +118,7 @@ function runGA() {
 	//curPolyline.setMap(map);
 	var i = 0;
 
-	for(var i = 0; i < 76; i++){
+	for(var i = 0; i < 75; i++){
 		population = ga.evolvePopulation(population);
 		localBest = population.getFittest();
 		if (localBest.getFitness() > best.getFitness()) {
@@ -46,8 +128,11 @@ function runGA() {
 		//bestPolyline.setPath(best.getPath());
 		var ind = Math.floor(Math.random() * locations.length);
 	}
-	console.log('best tour');
-	return best.tour;
+	console.log('best tour', best.fitness);
+	if(best.getDistance()){
+		return best.tour;
+	}
+	else return [];
 }
 
 function shuffle(a) {
@@ -86,20 +171,27 @@ function Tour() {
 	this.getDistance = function() {
 		if (this.distance == 0) {
 			var tourDistance = 0;
-			for (var i = 0; i < this.tour.length; i++) {
+			for (var i = 0; i < this.tour.length - 1; i++) {
 				var x = this.tour[i];
 				var y = this.tour[(i + 1) % this.tour.length];
 				tourDistance += distanceMatrix.getDuration(x, y);
+				tourDistance += stopTimes[i];
+				if(tourDistance > closingHours[i]){
+					console.log(tourDistance,closingHours[i], 'broke');
+					tourDistance = 0;
+					break;
+				}
 			}
 			this.distance = tourDistance;
 		}
 		return this.distance;
 	}
 	this.getFitness = function() {
-		if (this.fitness == 0) {
-			return 1 / this.getDistance();
+		var distance = this.getDistance();
+		if(distance > 0){
+			return 1 / distance;
 		}
-		return this.fitness;
+		else return 0;
 	}
 	this.containsMarker = function(marker) {
 		for (var i = 0; i < this.tour.length; i++) {
