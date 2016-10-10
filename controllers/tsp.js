@@ -4,7 +4,7 @@ var directionsService;
 var directionsDisplay;
 var bestPolyline;
 var curPolyline;
-
+var totalDuration = 0;
 var markers = [];
 var locations = [];
 var distanceMatrix;
@@ -40,6 +40,7 @@ var createPlacePromise = function(url){
 
 exports.getLocations = function(req,res,next){
 	//locations = 'Vancouver+BC|Seattle'.split('|');
+	//var stops = req.query.stops;
 	var origins = req.query.origins;
 	var destinations = req.query.destinations;
 	var pids = req.query.placeIds.split(',');
@@ -60,13 +61,13 @@ exports.getLocations = function(req,res,next){
 	.then(function(responses){
 		for(var ri in responses){
 			var res = JSON.parse(responses[ri]);
-			console.log(res);
+			//console.log(res.result.opening_hours.periods);
 			if(res.result.hasOwnProperty('opening_hours')){
 				if(!res.result.opening_hours.open_now){
 					closingHours.push(0);
 				}
-				else if(res.result.opening_hours.periods[dayNum].hasOwnProperty('close')){
-					console.log(res.result.opening_hours.periods[dayNum]);
+				else if(res.result.opening_hours.periods.length > 1){
+					console.log(res.result.opening_hours.periods);
 					var closingTime = parseInt(res.result.opening_hours.periods[dayNum].close.time.substring(0,2)) * 3600;
 					closingTime += parseInt(res.result.opening_hours.periods[dayNum].close.time.substring(2,4));
 					closingHours.push(closingTime);
@@ -83,22 +84,27 @@ exports.getLocations = function(req,res,next){
 				//console.log(body);
 
 				var response = JSON.parse(body);
-				distanceMatrix = new DistanceMatrix(response);
-				console.log('yo', closingHours);
+				distanceMatrix = createDistanceMatrix(response);
+				var durationOrdering = orderPermutations(distanceMatrix,stopTimes,closingHours);
+				//console.log('yo', closingHours);
+				var ret = selectOrder(durationOrdering);
+				res.json(ret);
 
-				var best = runGA();
-				if(best.length){
-					res.json({
-						status: 'OK',
-						optimalRoute: best
-					})
-				}
-				else{
-					res.json({
-						status: 'fail',
-						optimalRoute: best
-					});
-				}
+				// var best = runGA();
+				// if(best.length){
+				// 	res.json({
+				// 		status: 'OK',
+				// 		optimalRoute: best,
+				// 		totalDuration: totalDuration
+				// 	})
+				// }
+				// else{
+				// 	res.json({
+				// 		status: 'fail',
+				// 		optimalRoute: best,
+				// 		totalDuration: 0
+				// 	});
+				// }
 			}
 		})
 	})
@@ -106,6 +112,85 @@ exports.getLocations = function(req,res,next){
 	//console.log(origins);
 }
 
+function createDistanceMatrix(response) {
+	var distanceMatrix = [];
+	for(var rows in response.rows){
+		var row = []
+		for(var element in response.rows[rows].elements){
+			row.push(response.rows[rows].elements[element].duration.value);
+		}
+		distanceMatrix.push(row);
+	}
+	return distanceMatrix;
+}
+
+function permutator(inputArr) {
+  var results = [];
+  function permute(arr, memo) {
+    var cur, memo = memo || [];
+    for (var i = 0; i < arr.length; i++) {
+      cur = arr.splice(i, 1);
+      if (arr.length === 0) {
+        results.push(memo.concat(cur));
+      }
+      permute(arr.slice(), memo.concat(cur));
+      arr.splice(i, 0, cur[0]);
+    }
+    return results;
+  }
+  return permute(inputArr);
+}
+
+function createPermutatorList(num){
+	var lst = [];
+	for(var i = 1; i < num; i++){
+		lst.push(i);
+	}
+	return lst;
+}
+
+function selectOrder(orderDict){
+	var score = 0.0;
+	var ret = '';
+	for (var order in orderDict){
+		if(1/orderDict[order].duration > score){
+			score = 1/orderDict[order].duration;
+			ret = order;
+		}
+	}
+	return ret;
+}
+
+function orderPermutations(distanceMatrix, stopTimes, closingHours){
+	var permutations = permutator(createPermutatorList(stopTimes.length));
+	console.log('permutations', permutations);
+	var dict = {};
+	for(var i = 0; i < permutations.length; i++){
+		var prev = 0;
+		var permutation = '' + prev;
+		var dur = 0;
+		var feasible = true;
+		for(var j = 0; j < permutations[i].length; j++){
+			var current = permutations[i][j];
+			dur += distanceMatrix[prev][current];
+			console.log('distanceMatrix' + prev + current, distanceMatrix[prev][current]);
+			if(dur > closingHours[current]){
+				feasible = false;
+			}
+			dur += stopTimes[current];
+			console.log('stopTimes' + current, stopTimes[current]);
+			prev = current;
+			permutation += prev;
+		}
+		dict[permutation] = {
+				duration: dur,
+				feasibile: feasible
+		};
+	}
+	return dict;
+}
+
+/*
 function runGA() {
 	var ga = new GA();
 	var population = new Population(50, true);
@@ -128,7 +213,7 @@ function runGA() {
 		//bestPolyline.setPath(best.getPath());
 		var ind = Math.floor(Math.random() * locations.length);
 	}
-	console.log('best tour', best.fitness);
+	console.log('best tour', best.getDistance());
 	if(best.getDistance()){
 		return best.tour;
 	}
@@ -137,7 +222,7 @@ function runGA() {
 
 function shuffle(a) {
     var j, x, i;
-    for (i = a.length; i; i--) {
+    for (i = a.length - 1; i > 0; i--) {
         j = Math.floor(Math.random() * i);
         x = a[i - 1];
         a[i - 1] = a[j];
@@ -183,6 +268,7 @@ function Tour() {
 				}
 			}
 			this.distance = tourDistance;
+			totalDuration = tourDistance;
 		}
 		return this.distance;
 	}
@@ -302,3 +388,4 @@ function GA() {
 		return newPopulation;
 	}
 }
+*/
